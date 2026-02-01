@@ -36,8 +36,14 @@
   };
 
   const loadState = () => {
-    const data = sessionStorage.getItem(STORAGE_KEY);
-    return data ? JSON.parse(data) : null;
+    try {
+      const data = sessionStorage.getItem(STORAGE_KEY);
+      return data ? JSON.parse(data) : null;
+    } catch (e) {
+      console.error('状態の読み込みエラー:', e);
+      sessionStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
   };
 
   const clearState = () => {
@@ -72,8 +78,52 @@
     alert(`【アマゾン注文エクスポーター】\n\n❌ エラー: ${message}`);
   };
 
+  // ========== 領収書リンク取得 ==========
+  const parseHTML = (html) => {
+    const parser = new DOMParser();
+    return parser.parseFromString(html, 'text/html');
+  };
+
+  const fetchInvoiceLinks = async (orderId, popoverUrl) => {
+    try {
+      const url = popoverUrl.startsWith('http') ? popoverUrl : BASE_URL + popoverUrl;
+      const response = await fetch(url, { credentials: 'include' });
+      const html = await response.text();
+      const doc = parseHTML(html);
+
+      const links = {
+        printSummary: '',
+        invoice: '',
+        invoiceRequest: ''
+      };
+
+      const linkElements = doc.querySelectorAll('a');
+
+      linkElements.forEach(a => {
+        const text = cleanText(a.textContent);
+        const href = a.getAttribute('href');
+        if (!href) return;
+
+        const fullUrl = href.startsWith('http') ? href : BASE_URL + href;
+
+        if (text.includes('印刷可能な注文概要')) {
+          links.printSummary = fullUrl;
+        } else if (text.includes('明細書') || text.includes('適格請求書')) {
+          links.invoice = fullUrl;
+        } else if (text.includes('請求書のリクエスト')) {
+          links.invoiceRequest = fullUrl;
+        }
+      });
+
+      return links;
+    } catch (e) {
+      console.warn(`⚠️ 領収書リンク取得失敗 (${orderId}):`, e.message);
+      return { printSummary: '', invoice: '', invoiceRequest: '' };
+    }
+  };
+
   // ========== 注文カードから情報抽出 ==========
-  const extractOrderData = (card, year) => {
+  const extractOrderData = async (card, year, fetchInvoice) => {
     const orderIdEl = card.querySelector('.yohtmlc-order-id span[dir="ltr"]');
     const orderId = orderIdEl ? cleanText(orderIdEl.textContent) : '';
 
@@ -94,6 +144,16 @@
     const deliveryStatusEl = card.querySelector('.delivery-box__primary-text');
     const deliveryStatus = deliveryStatusEl ? cleanText(deliveryStatusEl.textContent) : '';
 
+    // 領収書ポップオーバーURL取得
+    let invoicePopoverUrl = '';
+    const invoicePopoverEl = card.querySelector('.yohtmlc-order-level-connections span[data-a-popover]');
+    if (invoicePopoverEl) {
+      try {
+        const popoverData = JSON.parse(invoicePopoverEl.getAttribute('data-a-popover'));
+        invoicePopoverUrl = popoverData.url || '';
+      } catch (e) {}
+    }
+
     // 商品情報
     const productTitles = card.querySelectorAll('.yohtmlc-product-title a');
     const products = [];
@@ -105,7 +165,7 @@
 
       if (!productName) return;
 
-      const asinMatch = productLink.match(/\/dp\/([A-Z0-9]+)/);
+      const asinMatch = productLink.match(/\/dp\/([A-Za-z0-9]+)/);
       const asin = asinMatch ? asinMatch[1] : productLink;
 
       if (seenAsins.has(asin)) return;
@@ -152,6 +212,13 @@
     const reviewLinkEl = card.querySelector('a[href*="review-your-purchases"]');
     const reviewLink = reviewLinkEl ? toFullUrl(reviewLinkEl.getAttribute('href')) : '';
 
+    // 領収書リンク取得
+    let invoiceLinks = { printSummary: '', invoice: '', invoiceRequest: '' };
+    if (fetchInvoice && invoicePopoverUrl) {
+      await sleep(300);  // レート制限対策
+      invoiceLinks = await fetchInvoiceLinks(orderId, invoicePopoverUrl);
+    }
+
     return {
       year,
       orderId,
@@ -160,7 +227,7 @@
       recipient,
       deliveryStatus,
       orderDetailsLink,
-      invoiceLinks: { printSummary: '', invoice: '', invoiceRequest: '' },
+      invoiceLinks,
       problemLink,
       returnLink,
       sellerFeedbackLink,
@@ -170,22 +237,22 @@
   };
 
   // ========== ページから注文を抽出 ==========
-  const extractOrdersFromCurrentPage = (year) => {
+  const extractOrdersFromCurrentPage = async (year, fetchInvoice) => {
     const orders = [];
     const orderCards = document.querySelectorAll('.order-card');
 
     console.log(`🔍 .order-card 要素数: ${orderCards.length}`);
 
-    orderCards.forEach(card => {
+    for (const card of orderCards) {
       try {
-        const orderData = extractOrderData(card, year);
+        const orderData = await extractOrderData(card, year, fetchInvoice);
         if (orderData) {
           orders.push(orderData);
         }
       } catch (e) {
         console.error('注文の解析エラー:', e);
       }
-    });
+    }
 
     return orders;
   };
@@ -365,10 +432,10 @@
 
   // ========== メインエクスポート処理 ==========
   const runExport = async (settings) => {
-    const { year, exportMode } = settings;
+    const { year, exportMode, fetchInvoice = false } = settings;
     const perPage = 10;
 
-    console.log(`🚀 エクスポート開始: ${year}年, モード: ${exportMode}`);
+    console.log(`🚀 エクスポート開始: ${year}年, モード: ${exportMode}, 領収書: ${fetchInvoice}`);
 
     // 現在のページが選択した年のページか確認
     const currentYear = getCurrentYearFromUrl();
@@ -379,6 +446,7 @@
       saveState({
         year,
         exportMode,
+        fetchInvoice,
         totalOrders: 0,
         totalPages: 0,
         collectedOrders: [],
@@ -404,18 +472,18 @@
     const currentStartIndex = getCurrentStartIndex();
     const currentPage = Math.floor(currentStartIndex / perPage);
 
-    // 現在のページの注文を抽出
-    const currentPageOrders = extractOrdersFromCurrentPage(year);
-    console.log(`📦 現在のページ: ${currentPageOrders.length}件取得`);
-
     // 状態を読み込み
     let state = loadState();
+
+    // 状態からfetchInvoice設定を取得（継続時用）
+    const shouldFetchInvoice = state?.fetchInvoice ?? fetchInvoice;
 
     if (!state || state.year !== year || state.exportMode !== exportMode) {
       // 新しいエクスポート開始
       state = {
         year,
         exportMode,
+        fetchInvoice: shouldFetchInvoice,
         totalOrders,
         totalPages,
         collectedOrders: [],
@@ -426,6 +494,11 @@
       state.totalOrders = totalOrders;
       state.totalPages = totalPages;
     }
+
+    // 現在のページの注文を抽出
+    reportProgress(state.collectedOrders.length, totalOrders, '注文を読み取り中...');
+    const currentPageOrders = await extractOrdersFromCurrentPage(year, shouldFetchInvoice);
+    console.log(`📦 現在のページ: ${currentPageOrders.length}件取得`);
 
     // 現在のページの注文を追加（重複チェック）
     const existingIds = new Set(state.collectedOrders.map(o => o.orderId));
@@ -498,7 +571,8 @@
 
       await runExport({
         year: state.year,
-        exportMode: state.exportMode
+        exportMode: state.exportMode,
+        fetchInvoice: state.fetchInvoice
       });
     }
   };
