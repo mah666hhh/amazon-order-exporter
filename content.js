@@ -1,22 +1,16 @@
 /**
  * アマゾン注文エクスポーター - Content Script
- * v2（商品単位）とv3（注文単位）を統合
+ * v3 - ページ遷移対応版
  */
 
 (function() {
   'use strict';
 
   const BASE_URL = 'https://www.amazon.co.jp';
-  let isCancelled = false;
-  let isRunning = false;  // 処理中フラグ
+  const STORAGE_KEY = 'amazon_order_exporter_state';
 
   // ========== ユーティリティ ==========
   const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-
-  const parseHTML = (html) => {
-    const parser = new DOMParser();
-    return parser.parseFromString(html, 'text/html');
-  };
 
   const cleanText = (text) => {
     return text ? text.trim().replace(/\s+/g, ' ') : '';
@@ -36,84 +30,53 @@
     return BASE_URL + path;
   };
 
-  // 進捗報告（ポップアップが閉じていても処理継続）
+  // ========== 状態管理 ==========
+  const saveState = (state) => {
+    sessionStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+  };
+
+  const loadState = () => {
+    const data = sessionStorage.getItem(STORAGE_KEY);
+    return data ? JSON.parse(data) : null;
+  };
+
+  const clearState = () => {
+    sessionStorage.removeItem(STORAGE_KEY);
+  };
+
+  // ========== 進捗報告 ==========
   const reportProgress = (current, total, message) => {
     chrome.runtime.sendMessage({
       action: 'progress',
       current,
       total,
       message
-    }).catch(() => {
-      // ポップアップが閉じている場合は無視
-    });
+    }).catch(() => {});
     console.log(`📊 進捗: ${current}/${total} ${message || ''}`);
   };
 
-  // 完了報告
   const reportComplete = (orderCount) => {
     chrome.runtime.sendMessage({
       action: 'complete',
       orderCount
-    }).catch(() => {
-      // ポップアップが閉じている場合は無視
-    });
+    }).catch(() => {});
     console.log(`✅ エクスポート完了: ${orderCount}件`);
   };
 
-  // エラー報告
   const reportError = (message) => {
     chrome.runtime.sendMessage({
       action: 'error',
       message
-    }).catch(() => {
-      // ポップアップが閉じている場合は無視
-    });
+    }).catch(() => {});
     console.error(`❌ エラー: ${message}`);
     alert(`【アマゾン注文エクスポーター】\n\n❌ エラー: ${message}`);
   };
 
-  // ========== 領収書リンク取得 ==========
-  const fetchInvoiceLinks = async (orderId, popoverUrl) => {
-    try {
-      const url = toFullUrl(popoverUrl);
-      const response = await fetch(url, { credentials: 'include' });
-      const html = await response.text();
-      const doc = parseHTML(html);
-      
-      const links = {
-        printSummary: '',
-        invoice: '',
-        invoiceRequest: ''
-      };
-
-      const linkElements = doc.querySelectorAll('.invoice-list a, ul a');
-      
-      linkElements.forEach(a => {
-        const text = cleanText(a.textContent);
-        const href = a.getAttribute('href');
-        
-        if (text.includes('印刷可能な注文概要')) {
-          links.printSummary = toFullUrl(href);
-        } else if (text.includes('明細書') || text.includes('適格請求書')) {
-          links.invoice = toFullUrl(href);
-        } else if (text.includes('請求書のリクエスト')) {
-          links.invoiceRequest = toFullUrl(href);
-        }
-      });
-
-      return links;
-    } catch (e) {
-      console.warn(`⚠️ 領収書リンク取得失敗 (${orderId}):`, e.message);
-      return { printSummary: '', invoice: '', invoiceRequest: '' };
-    }
-  };
-
   // ========== 注文カードから情報抽出 ==========
-  const extractOrderData = async (card, year, settings) => {
-    // ----- 注文ヘッダー情報 -----
+  const extractOrderData = (card, year) => {
     const orderIdEl = card.querySelector('.yohtmlc-order-id span[dir="ltr"]');
     const orderId = orderIdEl ? cleanText(orderIdEl.textContent) : '';
-    
+
     if (!orderId) return null;
 
     const orderDateEl = card.querySelector('.a-column.a-span3 .a-color-secondary.aok-break-word');
@@ -128,40 +91,30 @@
     const orderDetailsLinkEl = card.querySelector('a[href*="order-details"]');
     const orderDetailsLink = orderDetailsLinkEl ? toFullUrl(orderDetailsLinkEl.getAttribute('href')) : '';
 
-    const invoicePopoverEl = card.querySelector('.yohtmlc-order-level-connections span[data-a-popover]');
-    let invoicePopoverUrl = '';
-    if (invoicePopoverEl) {
-      try {
-        const popoverData = JSON.parse(invoicePopoverEl.getAttribute('data-a-popover'));
-        invoicePopoverUrl = popoverData.url || '';
-      } catch (e) {}
-    }
-
     const deliveryStatusEl = card.querySelector('.delivery-box__primary-text');
     const deliveryStatus = deliveryStatusEl ? cleanText(deliveryStatusEl.textContent) : '';
 
-    // ----- 商品情報（複数対応・重複排除） -----
+    // 商品情報
     const productTitles = card.querySelectorAll('.yohtmlc-product-title a');
-    
     const products = [];
     const seenAsins = new Set();
 
     productTitles.forEach(titleEl => {
       const productName = cleanText(titleEl.textContent);
       const productLink = toFullUrl(titleEl.getAttribute('href'));
-      
+
       if (!productName) return;
-      
+
       const asinMatch = productLink.match(/\/dp\/([A-Z0-9]+)/);
       const asin = asinMatch ? asinMatch[1] : productLink;
-      
+
       if (seenAsins.has(asin)) return;
       seenAsins.add(asin);
 
-      const itemContainer = titleEl.closest('.a-fixed-left-grid') || 
+      const itemContainer = titleEl.closest('.a-fixed-left-grid') ||
                             titleEl.closest('.item-box') ||
                             titleEl.closest('li');
-      
+
       let productImage = '';
       let buyAgainLink = '';
       let viewProductLink = '';
@@ -186,15 +139,7 @@
       });
     });
 
-    // ----- 領収書リンク取得 -----
-    let invoiceLinks = { printSummary: '', invoice: '', invoiceRequest: '' };
-    
-    if (settings.fetchInvoice && invoicePopoverUrl) {
-      await sleep(500);
-      invoiceLinks = await fetchInvoiceLinks(orderId, invoicePopoverUrl);
-    }
-
-    // ----- 注文レベルのボタンリンク -----
+    // 注文レベルのリンク
     const problemLinkEl = card.querySelector('a[href*="/hz/pwo"]');
     const problemLink = problemLinkEl ? toFullUrl(problemLinkEl.getAttribute('href')) : '';
 
@@ -215,7 +160,7 @@
       recipient,
       deliveryStatus,
       orderDetailsLink,
-      invoiceLinks,
+      invoiceLinks: { printSummary: '', invoice: '', invoiceRequest: '' },
       problemLink,
       returnLink,
       sellerFeedbackLink,
@@ -225,29 +170,29 @@
   };
 
   // ========== ページから注文を抽出 ==========
-  const extractOrdersFromPage = async (doc, year, settings) => {
+  const extractOrdersFromCurrentPage = (year) => {
     const orders = [];
-    const orderCards = doc.querySelectorAll('.order-card');
+    const orderCards = document.querySelectorAll('.order-card');
 
-    for (const card of orderCards) {
-      if (isCancelled) break;
+    console.log(`🔍 .order-card 要素数: ${orderCards.length}`);
 
+    orderCards.forEach(card => {
       try {
-        const orderData = await extractOrderData(card, year, settings);
+        const orderData = extractOrderData(card, year);
         if (orderData) {
           orders.push(orderData);
         }
       } catch (e) {
         console.error('注文の解析エラー:', e);
       }
-    }
+    });
 
     return orders;
   };
 
   // 総注文数を取得
-  const getTotalOrders = (doc) => {
-    const label = doc.querySelector('.num-orders');
+  const getTotalOrders = () => {
+    const label = document.querySelector('.num-orders');
     if (label) {
       const match = label.textContent.match(/(\d+)/);
       return match ? parseInt(match[1], 10) : 0;
@@ -255,22 +200,16 @@
     return 0;
   };
 
-  // ページを取得
-  const fetchPage = async (year, startIndex) => {
-    const url = `${BASE_URL}/your-orders/orders?timeFilter=year-${year}&startIndex=${startIndex}`;
-    const response = await fetch(url, { credentials: 'include' });
-    
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-    }
-    
-    return await response.text();
+  // 現在のページ番号を取得
+  const getCurrentStartIndex = () => {
+    const url = new URL(window.location.href);
+    return parseInt(url.searchParams.get('startIndex') || '0', 10);
   };
 
   // ========== CSV生成（注文単位） ==========
   const generateCSVByOrder = (orders) => {
     const SEPARATOR = ' / ';
-    
+
     const headers = [
       'Amazon 年',
       'Amazon 注文番号',
@@ -291,7 +230,7 @@
       'Amazon 出品者を評価',
       'Amazon 商品レビュー'
     ];
-    
+
     const rows = orders.map(order => {
       const productNames = order.products.map(p => p.productName).join(SEPARATOR) || '（商品名取得不可）';
       const productLinks = order.products.map(p => p.productLink).join(SEPARATOR);
@@ -318,7 +257,7 @@
         escapeCSV(order.reviewLink)
       ];
     });
-    
+
     return { headers, rows };
   };
 
@@ -345,9 +284,9 @@
       'Amazon 出品者を評価',
       'Amazon 商品レビュー'
     ];
-    
+
     const rows = [];
-    
+
     orders.forEach(order => {
       if (order.products.length > 0) {
         order.products.forEach(product => {
@@ -382,7 +321,7 @@
           escapeCSV(order.recipient),
           escapeCSV(order.deliveryStatus),
           '（商品名取得不可）',
-          '', '', 
+          '', '',
           escapeCSV(order.orderDetailsLink),
           escapeCSV(order.invoiceLinks.printSummary),
           escapeCSV(order.invoiceLinks.invoice),
@@ -395,7 +334,7 @@
         ]);
       }
     });
-    
+
     return { headers, rows };
   };
 
@@ -406,7 +345,7 @@
       headers.join(','),
       ...rows.map(row => row.join(','))
     ].join('\n');
-    
+
     const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -418,108 +357,145 @@
 
   // ========== メインエクスポート処理 ==========
   const runExport = async (settings) => {
-    // すでに処理中なら無視
-    if (isRunning) {
-      console.log('⚠️ すでにエクスポート処理中です');
-      alert('【アマゾン注文エクスポーター】\n\n⚠️ すでにエクスポート処理中です\n\nしばらくお待ちください');
-      return;
-    }
-    
-    isRunning = true;
-    isCancelled = false;
-    const { year, exportMode, fetchInvoice } = settings;
+    const { year, exportMode } = settings;
     const perPage = 10;
-    const delayMs = 1500;
 
     console.log(`🚀 エクスポート開始: ${year}年, モード: ${exportMode}`);
 
-    try {
-      // 最初のページを取得
-      reportProgress(0, 0, `${year}年の注文を確認中...`);
-      
-      const firstPageHtml = await fetchPage(year, 0);
-      const firstPageDoc = parseHTML(firstPageHtml);
-      
-      const totalOrders = getTotalOrders(firstPageDoc);
-      
-      if (totalOrders === 0) {
-        reportError(`${year}年の注文がありません`);
-        return;
+    const totalOrders = getTotalOrders();
+
+    if (totalOrders === 0) {
+      reportError(`${year}年の注文がありません`);
+      return;
+    }
+
+    console.log(`📊 ${year}年の注文数: ${totalOrders}件`);
+
+    const totalPages = Math.ceil(totalOrders / perPage);
+    const currentStartIndex = getCurrentStartIndex();
+    const currentPage = Math.floor(currentStartIndex / perPage);
+
+    // 現在のページの注文を抽出
+    const currentPageOrders = extractOrdersFromCurrentPage(year);
+    console.log(`📦 現在のページ: ${currentPageOrders.length}件取得`);
+
+    // 状態を読み込み
+    let state = loadState();
+
+    if (!state || state.year !== year || state.exportMode !== exportMode) {
+      // 新しいエクスポート開始
+      state = {
+        year,
+        exportMode,
+        totalOrders,
+        totalPages,
+        collectedOrders: [],
+        processedPages: []
+      };
+    }
+
+    // 現在のページの注文を追加（重複チェック）
+    const existingIds = new Set(state.collectedOrders.map(o => o.orderId));
+    currentPageOrders.forEach(order => {
+      if (!existingIds.has(order.orderId)) {
+        state.collectedOrders.push(order);
       }
+    });
 
-      console.log(`📊 ${year}年の注文数: ${totalOrders}件`);
-      
-      const allOrders = [];
-      let processedCount = 0;
+    if (!state.processedPages.includes(currentPage)) {
+      state.processedPages.push(currentPage);
+    }
 
-      // 最初のページ
-      const firstPageOrders = await extractOrdersFromPage(firstPageDoc, year, { fetchInvoice });
-      allOrders.push(...firstPageOrders);
-      processedCount += firstPageOrders.length;
-      reportProgress(processedCount, totalOrders);
+    const processedCount = state.collectedOrders.length;
+    reportProgress(processedCount, totalOrders);
 
-      // 残りのページ
-      const totalPages = Math.ceil(totalOrders / perPage);
-
-      for (let page = 1; page < totalPages; page++) {
-        if (isCancelled) {
-          console.log('⏹️ キャンセルされました');
-          return;
-        }
-
-        await sleep(delayMs);
-        
-        const startIndex = page * perPage;
-        const html = await fetchPage(year, startIndex);
-        const doc = parseHTML(html);
-        
-        const orders = await extractOrdersFromPage(doc, year, { fetchInvoice });
-        allOrders.push(...orders);
-        
-        processedCount += orders.length;
-        reportProgress(processedCount, totalOrders);
-      }
-
-      if (isCancelled) return;
-
-      // CSV生成
+    // すべてのページを処理したか確認
+    if (state.processedPages.length >= totalPages) {
+      // 完了 - CSVをダウンロード
       let csvData;
       let filename;
 
       if (exportMode === 'by-order') {
-        csvData = generateCSVByOrder(allOrders);
+        csvData = generateCSVByOrder(state.collectedOrders);
         filename = `amazon_orders_by_order_${year}.csv`;
       } else {
-        csvData = generateCSVByProduct(allOrders);
+        csvData = generateCSVByProduct(state.collectedOrders);
         filename = `amazon_orders_by_product_${year}.csv`;
       }
 
       downloadCSV(csvData.headers, csvData.rows, filename);
-      
-      reportComplete(allOrders.length);
+      reportComplete(state.collectedOrders.length);
+      clearState();
 
-    } catch (e) {
-      console.error('❌ エクスポートエラー:', e);
-      reportError(e.message);
-    } finally {
-      isRunning = false;
+    } else {
+      // 次のページへ移動
+      saveState(state);
+
+      // 未処理のページを探す
+      let nextPage = -1;
+      for (let i = 0; i < totalPages; i++) {
+        if (!state.processedPages.includes(i)) {
+          nextPage = i;
+          break;
+        }
+      }
+
+      if (nextPage >= 0) {
+        const nextStartIndex = nextPage * perPage;
+        const nextUrl = `${BASE_URL}/your-orders/orders?timeFilter=year-${year}&startIndex=${nextStartIndex}`;
+
+        console.log(`📄 次のページへ移動: ${nextPage + 1}/${totalPages}`);
+        reportProgress(processedCount, totalOrders, `ページ ${state.processedPages.length}/${totalPages} 完了。次のページへ移動...`);
+
+        await sleep(1500);
+        window.location.href = nextUrl;
+      }
+    }
+  };
+
+  // ========== ページ読み込み時の自動継続 ==========
+  const checkAndContinue = async () => {
+    const state = loadState();
+
+    if (state && state.collectedOrders) {
+      console.log(`📂 エクスポート継続中... (${state.collectedOrders.length}件収集済)`);
+
+      // 少し待ってから継続
+      await sleep(2000);
+
+      await runExport({
+        year: state.year,
+        exportMode: state.exportMode
+      });
     }
   };
 
   // ========== メッセージ受信 ==========
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message.action === 'startExport') {
+      // 新規エクスポート開始時は状態をクリア
+      clearState();
       runExport(message.settings);
       sendResponse({ status: 'started' });
     } else if (message.action === 'cancelExport') {
-      isCancelled = true;
-      isRunning = false;
+      clearState();
       sendResponse({ status: 'cancelled' });
     } else if (message.action === 'getStatus') {
-      sendResponse({ isRunning });
+      const state = loadState();
+      sendResponse({
+        isRunning: !!state,
+        collectedCount: state ? state.collectedOrders.length : 0
+      });
     }
     return true;
   });
+
+  // ページ読み込み完了後に自動継続チェック
+  if (document.readyState === 'complete') {
+    checkAndContinue();
+  } else {
+    window.addEventListener('load', checkAndContinue);
+  }
 
   console.log('📦 アマゾン注文エクスポーター: Content script loaded');
 
