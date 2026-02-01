@@ -144,14 +144,27 @@
     const deliveryStatusEl = card.querySelector('.delivery-box__primary-text');
     const deliveryStatus = deliveryStatusEl ? cleanText(deliveryStatusEl.textContent) : '';
 
-    // 領収書ポップオーバーURL取得
+    // 領収書ポップオーバーURL取得（2つのパターンに対応）
     let invoicePopoverUrl = '';
-    const invoicePopoverEl = card.querySelector('.yohtmlc-order-level-connections span[data-a-popover]');
+
+    // パターン1: 2026年以降の新しい構造（span[data-a-popover]）
+    const invoicePopoverEl = card.querySelector('span[data-a-popover] a[href*="/your-orders/invoice/popover"]');
     if (invoicePopoverEl) {
-      try {
-        const popoverData = JSON.parse(invoicePopoverEl.getAttribute('data-a-popover'));
-        invoicePopoverUrl = popoverData.url || '';
-      } catch (e) {}
+      const parentSpan = invoicePopoverEl.closest('span[data-a-popover]');
+      if (parentSpan) {
+        try {
+          const popoverData = JSON.parse(parentSpan.getAttribute('data-a-popover'));
+          invoicePopoverUrl = popoverData.url || '';
+        } catch (e) {}
+      }
+    }
+
+    // パターン2: 2017年等の古い構造（直接aタグ）
+    if (!invoicePopoverUrl) {
+      const invoiceLinkEl = card.querySelector('a[href*="/your-orders/invoice/popover"]');
+      if (invoiceLinkEl) {
+        invoicePopoverUrl = invoiceLinkEl.getAttribute('href') || '';
+      }
     }
 
     // 商品情報
