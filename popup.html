@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>アマゾン注文エクスポーター</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>📦 アマゾン注文エクスポーター</h1>
+    </header>
+
+    <main>
+      <!-- エラーメッセージ -->
+      <div id="error-message" class="error-message hidden">
+        <p>⚠️ 注文履歴ページで開いてください</p>
+        <p class="error-sub">このツールはAmazonの注文履歴ページでのみ動作します</p>
+        <a href="https://www.amazon.co.jp/your-orders/orders" target="_blank" class="error-link">📋 注文履歴を開く</a>
+      </div>
+
+      <!-- 設定フォーム -->
+      <div id="settings-form">
+        <!-- 対象年 -->
+        <div class="form-group">
+          <label for="year-select">対象年</label>
+          <select id="year-select">
+            <!-- JSで動的に生成 -->
+          </select>
+        </div>
+
+        <!-- 出力形式 -->
+        <div class="form-group">
+          <label>出力形式</label>
+          <div class="radio-group">
+            <label class="radio-label">
+              <input type="radio" name="export-mode" value="by-order" checked>
+              <span class="radio-text">
+                <strong>注文単位</strong>
+                <small>1注文 = 1行（複数商品は結合）</small>
+              </span>
+            </label>
+            <label class="radio-label">
+              <input type="radio" name="export-mode" value="by-product">
+              <span class="radio-text">
+                <strong>商品単位</strong>
+                <small>1商品 = 1行</small>
+              </span>
+            </label>
+          </div>
+        </div>
+
+        <!-- オプション -->
+        <div class="form-group">
+          <label class="checkbox-label">
+            <input type="checkbox" id="fetch-invoice" checked>
+            <span>領収書リンクを取得</span>
+            <small class="checkbox-note">（取得に時間がかかります）</small>
+          </label>
+        </div>
+
+        <!-- 実行ボタン -->
+        <button id="export-btn" class="export-btn">
+          エクスポート開始
+        </button>
+      </div>
+
+      <!-- 進捗表示 -->
+      <div id="progress-section" class="hidden">
+        <div class="progress-header">
+          <span id="progress-text">準備中...</span>
+          <span id="progress-percent">0%</span>
+        </div>
+        <div class="progress-bar">
+          <div id="progress-fill" class="progress-fill"></div>
+        </div>
+        <p class="progress-note">💡 このウィンドウを閉じても処理は続行されます</p>
+        <button id="cancel-btn" class="cancel-btn">キャンセル</button>
+      </div>
+
+      <!-- 完了メッセージ -->
+      <div id="complete-section" class="hidden">
+        <div class="complete-message">
+          <span class="complete-icon">✅</span>
+          <p id="complete-text">エクスポート完了！</p>
+        </div>
+        <button id="restart-btn" class="restart-btn">新しいエクスポート</button>
+      </div>
+    </main>
+
+    <footer>
+      <small>v1.0.0 | Amazon.co.jp 専用</small>
+      <div class="footer-link">
+        <a href="https://www.amazon.co.jp/hz/wishlist/ls/2UU7DRTSDKRCI?ref_=list_d_wl_lfu_nav_2" target="_blank">🎁 開発者のウィッシュリスト</a>
+      </div>
+    </footer>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
