@@ -206,6 +206,14 @@
     return parseInt(url.searchParams.get('startIndex') || '0', 10);
   };
 
+  // 現在のページの年フィルターを取得
+  const getCurrentYearFromUrl = () => {
+    const url = new URL(window.location.href);
+    const timeFilter = url.searchParams.get('timeFilter') || '';
+    const match = timeFilter.match(/year-(\d+)/);
+    return match ? match[1] : null;
+  };
+
   // ========== CSV生成（注文単位） ==========
   const generateCSVByOrder = (orders) => {
     const SEPARATOR = ' / ';
@@ -362,10 +370,31 @@
 
     console.log(`🚀 エクスポート開始: ${year}年, モード: ${exportMode}`);
 
+    // 現在のページが選択した年のページか確認
+    const currentYear = getCurrentYearFromUrl();
+    if (currentYear !== String(year)) {
+      console.log(`📍 年が異なるためリダイレクト: 現在=${currentYear}, 選択=${year}`);
+
+      // 状態を保存してリダイレクト
+      saveState({
+        year,
+        exportMode,
+        totalOrders: 0,
+        totalPages: 0,
+        collectedOrders: [],
+        processedPages: []
+      });
+
+      const targetUrl = `${BASE_URL}/your-orders/orders?timeFilter=year-${year}&startIndex=0`;
+      window.location.href = targetUrl;
+      return;
+    }
+
     const totalOrders = getTotalOrders();
 
     if (totalOrders === 0) {
       reportError(`${year}年の注文がありません`);
+      clearState();
       return;
     }
 
@@ -392,6 +421,10 @@
         collectedOrders: [],
         processedPages: []
       };
+    } else {
+      // 継続時は最新のtotalOrdersを更新
+      state.totalOrders = totalOrders;
+      state.totalPages = totalPages;
     }
 
     // 現在のページの注文を追加（重複チェック）
